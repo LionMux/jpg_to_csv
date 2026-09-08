@@ -85,8 +85,8 @@ def process_single_task(
             - digits (str): Распознанные цифры (строго '0'-'9' или пустая строка).
             - is_three_digit (bool): True, если распознано ровно 3 цифры.
             - status (str): Диагностический статус обработки ('OK', 'OK_SPACED',
-                            'OK_RAW_LINE', 'EMPTY_FRAME', 'PARTIAL', 'EMPTY',
-                            'ERROR_DECODE', 'ERROR_*').
+                            'OK_RAW_LINE', 'OK_SCALED', 'EMPTY_FRAME', 'PARTIAL',
+                            'EMPTY', 'ERROR_DECODE', 'ERROR_*').
     """
     try:
         img_bgr = decode_image_bytes(img_bytes)

@@ -1,10 +1,11 @@
 """
 Высокоскоростной движок нейросетевого OCR для капч строго из цифр [0-9].
 Использует легковесный ONNX граф с маскированием логитов (Logits Masking)
-и 3-стадийный каскадный рефайнер:
-1. Стандартная фильтрация линии + вертикальное залечивание.
+и 4-стадийный каскадный рефайнер:
+1. Intersection-Aware фильтрация линии + вертикальное залечивание.
 2. Сохранение линии (для ультратонких шрифтов, где вычитание линии съедает штрих).
 3. Пространственное разделение с гарантированным гэпом (для слитных повторов 777, 811, 440).
+4. Fallback горизонтального масштабирования (Aspect Ratio Scaling 1.8x).
 
 Потребление RAM: ~70-90 МБ. Скорость: 5-8 мс/кадр.
 """
@@ -98,6 +99,7 @@ class DigitOCREngine:
 
         # 4. Стратегия Б: сохранение линии (для тонких штрихов)
         padded_raw = prepare_crop_and_pad(thresh)
+        pred_raw = ""
         if padded_raw is not None:
             pred_raw = self._infer_image(padded_raw)
             if len(pred_raw) == 3:
@@ -105,13 +107,25 @@ class DigitOCREngine:
 
         # 5. Стратегия В: пространственный рефайнер для слитных повторов (777, 811)
         spaced = prepare_spaced_components(clean)
+        pred_spaced = ""
         if spaced is not None:
             pred_spaced = self._infer_image(spaced)
             if len(pred_spaced) == 3:
                 return pred_spaced, "OK_SPACED"
 
+        # 6. Fallback-стратегия Г: горизонтальное масштабирование (Aspect Ratio Scaling 1.8x)
+        pred_scaled = ""
+        target_padded = padded if padded is not None else padded_raw
+        if target_padded is not None:
+            h, w = target_padded.shape[:2]
+            scaled = cv2.resize(target_padded, (int(round(w * 1.8)), h), interpolation=cv2.INTER_LINEAR)
+            _, scaled_bin = cv2.threshold(scaled, 127, 255, cv2.THRESH_BINARY)
+            pred_scaled = self._infer_image(scaled_bin)
+            if len(pred_scaled) == 3:
+                return pred_scaled, "OK_SCALED"
+
         # Возвращаем лучший частичный результат
-        candidates = [p for p in [pred, pred_raw if padded_raw is not None else ""] if p]
+        candidates = [p for p in [pred, pred_raw, pred_spaced, pred_scaled] if p]
         best_pred = max(candidates, key=len) if candidates else ""
 
         if len(best_pred) == 3:

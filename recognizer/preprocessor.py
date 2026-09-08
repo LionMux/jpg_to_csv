@@ -16,7 +16,10 @@ from PIL import Image
 def clean_dots_and_background(img_bgr: np.ndarray) -> np.ndarray:
     """
     Удаляет точечную сетку и фон, возвращая бинарную маску цифр и помех.
-    Время выполнения: ~0.10 мс.
+    - Оценка цвета фона по углам и бинаризация по Otsu.
+    - Зануление краевых зон толщиной 4 px по периметру.
+    - Фильтрация регулярной сетки белых точек 2x2 px через cv2.connectedComponentsWithStats.
+    Время выполнения: ~0.15 мс.
     """
     # 1. Подавление точечного шума (сетки белых точек)
     denoised = cv2.medianBlur(img_bgr, 3)
@@ -40,26 +43,57 @@ def clean_dots_and_background(img_bgr: np.ndarray) -> np.ndarray:
 
     # 4. Адаптивный порог Otsu
     _, thresh = cv2.threshold(diff_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # 5. Зануление краевых зон толщиной 4 px по периметру
+    h, w = thresh.shape[:2]
+    if h >= 8 and w >= 8:
+        thresh[:4, :] = 0
+        thresh[-4:, :] = 0
+        thresh[:, :4] = 0
+        thresh[:, -4:] = 0
+
+    # 6. Фильтрация регулярной сетки белых точек (w, h <= 5 или area < 25)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(thresh, connectivity=8)
+    for i in range(1, num_labels):
+        w = stats[i, cv2.CC_STAT_WIDTH]
+        h = stats[i, cv2.CC_STAT_HEIGHT]
+        area = stats[i, cv2.CC_STAT_AREA]
+        if (w <= 5 and h <= 5) or area < 25:
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            thresh[y : y + h, x : x + w][labels[y : y + h, x : x + w] == i] = 0
+
     return thresh
 
 
 def remove_strikethrough_line(thresh: np.ndarray) -> np.ndarray:
     """
-    Удаляет сквозную горизонтальную линию и залечивает вертикальные разрывы.
+    Удаляет сквозную горизонтальную линию с защитой зон пересечения со штрихами цифр
+    (Intersection-Aware Line Removal) и залечивает вертикальные микроразрывы.
     Время выполнения: ~0.04 мс.
     """
-    # Детекция длинной непрерывной горизонтальной полосы (ширина >= 25 px)
-    k_line = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
-    line = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, k_line)
-
-    # Линия всегда проходит в центральной зоне высоты y: 20..60
+    h, w = thresh.shape[:2]
+    # 1. Детекция линии: horizontal open ядром (20, 1) в центральной зоне y: 20..60
+    k_line = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
     line_roi = np.zeros_like(thresh)
-    line_roi[20:60, :] = line[20:60, :]
+    y_min, y_max = min(20, h), min(60, h)
+    if y_max > y_min:
+        line_roi[y_min:y_max, :] = cv2.morphologyEx(thresh[y_min:y_max, :], cv2.MORPH_OPEN, k_line)
 
-    # Вычитание обнаруженной линии
-    clean = cv2.subtract(thresh, line_roi)
+    # 2. Детекция вертикальных штрихов цифр: vertical open ядром (1, 6)
+    k_v_stroke = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 6))
+    v_strokes = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, k_v_stroke)
 
-    # Вертикальное закрытие для сращивания разрывов штрихов
+    # 3. Защита зон пересечений штрихов: перекрестки дилатируются ядром (3, 3)
+    inter = cv2.bitwise_and(line_roi, v_strokes)
+    k_inter = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    inter_dilated = cv2.dilate(inter, k_inter)
+
+    # 4. Вычитание только свободной линии (subtract(line, inter))
+    free_line = cv2.subtract(line_roi, inter_dilated)
+    clean = cv2.subtract(thresh, free_line)
+
+    # 5. Легкое вертикальное закрытие ядром (1, 3) для сращивания разрывов
     k_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3))
     repaired = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, k_v)
     return repaired
